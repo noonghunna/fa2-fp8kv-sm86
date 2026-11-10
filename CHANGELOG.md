@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Backport Dao-AILab/flash-attention#3101 to `headers/flash_fwd_kernel.h`: the
+  split-KV kernel's K/V block steps and its `out_accum` / `lse_accum` offsets,
+  and the combine kernel's per-split step and row offsets, are computed in
+  64 bits. In 32 bits a row stride of 2^31 / kBlockN elements or more, or a
+  split offset past 2^31 elements, wraps and reads the wrong address. The
+  15 changed lines are upstream's; the rotary steps stay `int`, as upstream.
+  `patches/fa2-fp8kv.patch` regenerated; `check_upstream.py` passes.
+
 ## 0.1.0 — 2026-10-04
 
 - Split long full-causal prefill in mixed vLLM 0.29 batches into per-request

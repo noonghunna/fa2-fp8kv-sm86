@@ -26,6 +26,10 @@ Local modifications add paged FP8 E4M3 KV loading, BF16 conversion,
 split-KV decoding, GQA row packing with causal remapping, asynchronous
 FP8 staging, and CUDA Graph compatible vLLM metadata handling.
 
+headers/flash_fwd_kernel.h also carries Dao-AILab/flash-attention commit
+478b5b01 (PR #3101, BSD 3-Clause): 64-bit split-KV block steps and
+accumulator offsets. The vllm-project base revision above predates it.
+
 CUTLASS and FlashInfer are external build dependencies with their own
 licenses. They are not relicensed by this repository.
 

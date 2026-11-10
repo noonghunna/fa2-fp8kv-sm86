@@ -40,7 +40,7 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
      using ElementAccum = typename Kernel_traits::ElementAccum;
      using index_t = typename Kernel_traits::index_t;
  
-@@ -532,15 +535,16 @@
+@@ -532,24 +535,25 @@
      // if (threadIdx.x == 0 && blockIdx.y == 1 && blockIdx.z == 0) { printf("params.knew_ptr = %p, seqlen_k_cache + seqlen_knew = %d\n", params.knew_ptr, binfo.seqlen_k_cache + (params.knew_ptr == nullptr ? 0 : params.seqlen_knew)); }
      if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
  
@@ -66,6 +66,17 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
      if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
          // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
          // Otherwise we might read OOB elements from gK and gV,
+         // or get wrong results when we combine gOaccum from different blocks.
+         const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
+             + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+-        const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
++        const index_t row_offset_oaccum = (((static_cast<index_t>(n_split_idx) * params.b + bidb) * params.h + bidh) * params.seqlen_q
+             + m_block * kBlockM) * params.d_rounded;
+-        const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
++        const index_t row_offset_lseaccum = ((static_cast<index_t>(n_split_idx) * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+         Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
+                                       Shape<Int<kBlockM>, Int<kHeadDim>>{},
+                                      make_stride(Split ? kHeadDim : params.o_row_stride, _1{}));
 @@ -603,11 +607,11 @@
                              make_stride(params.q_row_stride, params.q_head_stride, _1{}));
      Tensor gQ = local_tile(mQ(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
@@ -101,6 +112,29 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
  
      if (block_table != nullptr) {
          auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
+@@ -767,7 +785,7 @@
+             FLASH_NAMESPACE::copy_w_min_idx<Is_even_K>(
+                 tVgVnew, tVgV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN, binfo.seqlen_k_cache - n_block * kBlockN
+             );
+-            tVgVnew.data() = tVgVnew.data() + (-int(kBlockN * params.vnew_row_stride));
++            tVgVnew.data() = tVgVnew.data() + (-index_t(kBlockN * params.vnew_row_stride));
+             if (params.rotary_dim == 0) {
+                 FLASH_NAMESPACE::copy_w_min_idx<Is_even_K>(
+                     tKgKnew, tKgK, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN, binfo.seqlen_k_cache - n_block * kBlockN
+@@ -792,10 +810,10 @@
+ 
+                 }
+             }
+-            tKgKnew.data() = tKgKnew.data() + (-int(kBlockN * params.knew_row_stride));
++            tKgKnew.data() = tKgKnew.data() + (-index_t(kBlockN * params.knew_row_stride));
+             if (block_table == nullptr) {
+-                tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
+-                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
++                tVgV.data() = tVgV.data() + (-index_t(kBlockN * params.v_row_stride));
++                tKgK.data() = tKgK.data() + (-index_t(kBlockN * params.k_row_stride));
+             } else {
+                 if (n_block > n_block_copy_min) {
+                     tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
 @@ -855,8 +873,8 @@
  
      int n_block = n_block_max - 1;
@@ -141,7 +175,7 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
  
      // For performance reason, we separate out two kinds of iterations:
      // those that need masking on S, and those that don't.
-@@ -888,6 +926,10 @@
+@@ -888,20 +926,24 @@
          clear(acc_s);
          FLASH_NAMESPACE::cp_async_wait<0>();
          __syncthreads();
@@ -152,7 +186,10 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
  
          // Advance gV
          if (masking_step > 0) {
-@@ -897,11 +939,11 @@
+             if (block_table == nullptr) {
+-                tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
++                tVgV.data() = tVgV.data() + (-index_t(kBlockN * params.v_row_stride));
+             } else {
                  tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                      block_table, params.v_batch_stride, params.v_row_stride);
              }
@@ -166,7 +203,7 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
              );
          }
          cute::cp_async_fence();
-@@ -923,8 +965,13 @@
+@@ -923,17 +965,22 @@
          FLASH_NAMESPACE::cp_async_wait<0>();
          __syncthreads();
          // if (tidx == 0 && blockIdx.y == 0 && blockIdx.z == 0) { print(tVsV); }
@@ -180,7 +217,9 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
          if (n_block > n_block_min) {
              // Advance gK
              if (block_table == nullptr) {
-@@ -933,7 +980,7 @@
+-                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
++                tKgK.data() = tKgK.data() + (-index_t(kBlockN * params.k_row_stride));
+             } else {
                  tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                      block_table, params.k_batch_stride, params.k_row_stride);
              }
@@ -189,7 +228,7 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
              // This cp_async_fence needs to be in the if block, otherwise the synchronization
              // isn't right and we get race conditions.
              cute::cp_async_fence();
-@@ -966,6 +1013,10 @@
+@@ -966,15 +1013,19 @@
          clear(acc_s);
          FLASH_NAMESPACE::cp_async_wait<0>();
          __syncthreads();
@@ -199,8 +238,10 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
 +#endif
          // Advance gV
          if (block_table == nullptr) {
-             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
-@@ -974,7 +1025,7 @@
+-            tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
++            tVgV.data() = tVgV.data() + (-index_t(kBlockN * params.v_row_stride));
+         } else {
+             tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size, 
                  block_table, params.v_batch_stride, params.v_row_stride);
          }
  
@@ -209,7 +250,7 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
          cute::cp_async_fence();
  
          FLASH_NAMESPACE::gemm(
-@@ -987,6 +1038,11 @@
+@@ -987,15 +1038,20 @@
  
          FLASH_NAMESPACE::cp_async_wait<0>();
          __syncthreads();
@@ -221,7 +262,9 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
          if (n_block > n_block_min) {
              // Advance gK
              if (block_table == nullptr) {
-@@ -995,7 +1051,7 @@
+-                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
++                tKgK.data() = tKgK.data() + (-index_t(kBlockN * params.k_row_stride));
+             } else {
                  tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                      block_table, params.k_batch_stride, params.k_row_stride);            
              }
@@ -230,6 +273,28 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
              // This cp_async_fence needs to be in the if block, otherwise the synchronization
              // isn't right and we get race conditions.
              cute::cp_async_fence();
+@@ -1040,10 +1096,10 @@
+ 
+     const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
+         + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+-    const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
++    const index_t row_offset_oaccum = (((static_cast<index_t>(n_split_idx) * params.b + bidb) * params.h + bidh) * params.seqlen_q
+                                          + m_block * kBlockM) * params.d_rounded;
+     const index_t row_offset_lseaccum = (Split || !params.unpadded_lse ?
+-            ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q : bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb)
++            ((static_cast<index_t>(n_split_idx) * params.b + bidb) * params.h + bidh) * params.seqlen_q : bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb)
+         ) + m_block * kBlockM;
+ 
+     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
+@@ -1150,7 +1206,7 @@
+     const int tidx = threadIdx.x;
+     const int bidx = blockIdx.x;
+ 
+-    const index_t lse_size = params.b * params.h * params.seqlen_q;
++    const index_t lse_size = static_cast<index_t>(params.b) * params.h * params.seqlen_q;
+ 
+     const index_t row_offset_lse = bidx * kBlockM;
+     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
 @@ -1222,7 +1278,19 @@
          if (params.unpadded_lse) {
              const index_t lse_offset = row_offset_lse + tidx / kRowsPerLoadTranspose;
@@ -251,6 +316,24 @@ diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_
              }
          } else {
              gLSE(tidx / kRowsPerLoadTranspose) = lse_logsum;
+@@ -1237,7 +1305,7 @@
+     }
+     __syncthreads();
+ 
+-    const index_t row_offset_oaccum = bidx * kBlockM * params.d_rounded;
++    const index_t row_offset_oaccum = static_cast<index_t>(bidx) * kBlockM * params.d_rounded;
+     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
+                                  Shape<Int<kBlockM>, Int<kHeadDim>>{},
+                                  Stride<Int<kHeadDim>, _1>{});
+@@ -1281,7 +1349,7 @@
+             }
+         // if (cute::thread0()) { printf("lse_scale = %f, %f\n", sLSE[split][0], sLSE[split][1]); print(tOrOaccum); }
+         }
+-        tOgOaccum.data() = tOgOaccum.data() + params.b * params.h * params.seqlen_q * params.d_rounded;
++        tOgOaccum.data() = tOgOaccum.data() + lse_size * params.d_rounded;
+     }
+     // if (cute::thread0()) { print_tensor(tOrO); }
+ 
 @@ -1295,8 +1363,17 @@
              const int head_idx = (idx - batch_idx * (params.h * params.seqlen_q)) / params.seqlen_q;
              // The index to the rows of Q
